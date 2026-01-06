@@ -245,8 +245,25 @@ public:
                     int extraBufferCells = 2);       // 额外的边界缓冲层数
     void GenerateSPICENetlist(const std::string &filename);
 
-    // 设置注入点（相对坐标，0-1之间）
+    // 注入点设置
+    /// 相对坐标，0-1之间
     void SetInjectionPoint(double relX, double relY, double rSpread = 50.0, double rDiffuseFactor = 0.1);
+    /// 绝对坐标，单位米
+    void SetInjectionPointAbsolute(double absX, double absY, double rSpread = 50.0, double rDiffuseFactor = 0.1);
+
+    // 电流源设置
+    /// @param totalCharge 总电荷量 (库仑), 5000 e-h对
+    /// @param pulseWidth 脉冲宽度 (秒)，建议1ps
+    void SetDeltaInjection(double totalCharge = 1.6e-19 * 5000, double pulseWidth = 1e-12);
+    void GenerateSPICEInjectionDelta(std::ostream &out, double totalCharge = 1.6e-19 * 5000, double pulseWidth = 1e-12);
+
+    void SetPWLInjection(const std::string &csvFile);
+    void GenerateSPICEInjectionPWL(std::ostream &out, const std::string &filename);
+
+    // 仿真设置
+    void SetSimulationParameters(double totalTime = 20e-9, double timeStep = 0.1e-12);
+    void SaveAllNodeWaveforms(bool saveAll = true) { fSaveAll = saveAll; }
+    void AddWaveformNode(const std::string &nodeName) { fSaveNodeNames.push_back(nodeName); }
 
     // 电极定义（添加电极并自动计算最近节点）
     // void AddElectrode(double absX, double absY, double cSiN_per_area, double rAmp, double rContact = 0.001);
@@ -254,6 +271,7 @@ public:
                                  double sizeX, double sizeY,     // 电极尺寸 (100e-6 m)
                                  double cSiN_per_area, double rAmp,
                                  double rContact = 0.001);
+    void SetVirtualVoltageSource(bool useVirtual) { fVirtualVoltageSource = useVirtual; }
 
 private:
     // 物理参数
@@ -270,8 +288,23 @@ private:
     int fNx, fNy;    // X,Y方向网格总数
     double fLx, fLy; // 平板总尺寸
 
-    double fElectrodeBuffer; // 电极外缓冲尺寸
-    int fGlobalBuf;          // 全局缓冲网格数
+    double fElectrodeBuffer;            // 电极外缓冲尺寸
+    int fGlobalBuf;                     // 全局缓冲网格数
+    bool fVirtualVoltageSource = false; // 是否使用虚拟电压源测量电流
+
+    // 电流源设置
+    bool fIsPWL = false;         // 是否使用PWL电流源，默认不使用，使用瞬时三角脉冲
+    double fInjectionCharge;     // 注入电荷量
+    double fInjectionPulseWidth; // 注入脉冲宽度
+
+    std::string sfPWLFileName = "injection_pwl.txt"; // PWL文件名
+
+    // 仿真设置
+    double fTotalTime; // 总仿真时间
+    double fTimeStep;  // 时间步长
+
+    bool fSaveAll = true;                    // 是否保存所有节点波形
+    std::vector<std::string> fSaveNodeNames; // 需要单独保存波形的节点名称
 
     // 节点与元件存储
 

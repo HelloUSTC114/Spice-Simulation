@@ -43,3 +43,5 @@
 
 simu*/
 .vscode
+*.raw
+*.asc

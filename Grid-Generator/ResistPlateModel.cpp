@@ -105,7 +105,11 @@ void ResistivePlateModel::SetInjectionPoint(double relX, double relY, double rSp
     // 计算绝对坐标，注意这里起始点为(-fElectrodeBuffer, -fElectrodeBuffer)
     double absX = relX * fLx - fElectrodeBuffer;
     double absY = relY * fLy - fElectrodeBuffer;
+    SetInjectionPointAbsolute(absX, absY, rSpread, rDiffuseFactor);
+}
 
+void ResistivePlateModel::SetInjectionPointAbsolute(double absX, double absY, double rSpread, double rDiffuseFactor)
+{
     // 找到中心节点
     fInjection.centerNodeId = FindNearestNode(absX, absY);
     fInjection.rSpread = rSpread;
@@ -136,6 +140,45 @@ void ResistivePlateModel::SetInjectionPoint(double relX, double relY, double rSp
     {
         fInjection.neighborNodes.push_back(distances[i].second);
     }
+}
+
+void ResistivePlateModel::SetDeltaInjection(double totalCharge, double pulseWidth)
+{
+    fIsPWL = false;
+    fInjectionCharge = totalCharge;
+    fInjectionPulseWidth = pulseWidth;
+}
+
+void ResistivePlateModel::GenerateSPICEInjectionDelta(std::ostream &out, double totalCharge, double pulseWidth)
+{
+    out << "* 三角形δ脉冲模型 *\n";
+    // Generate a pulse current source for injection
+    // double totalCharge = 1.6e-19 * 5000;      // 总电荷量 (库仑), 5000 e-h对
+    // double pulseWidth = 1e-12;                // 脉冲宽度 (秒)，建议1ps
+    double I_peak = totalCharge / pulseWidth; // 峰值电流 (安培)
+    double t_rise = pulseWidth / 2.0;
+    double t_fall = pulseWidth / 2.0;
+    out << Form("Iinj INJ_NODE 0 PWL(0 0 %.3e %.3e %.3e 0) ; 三角形δ脉冲\n",
+                t_rise, I_peak,
+                t_rise + t_fall);
+}
+
+void ResistivePlateModel::SetPWLInjection(const std::string &csvFile)
+{
+    fIsPWL = true;
+    sfPWLFileName = csvFile;
+}
+
+void ResistivePlateModel::GenerateSPICEInjectionPWL(std::ostream &out, const std::string &filename)
+{
+    out << "* PWL注入模型 *\n";
+    out << Form("Iinj INJ_NODE 0 PWL FILE=\"%s\" ; PWL 电流源\n", filename.c_str());
+}
+
+void ResistivePlateModel::SetSimulationParameters(double totalTime, double timeStep)
+{
+    fTotalTime = totalTime;
+    fTimeStep = timeStep;
 }
 
 void ResistivePlateModel::GenerateSPICENetlist(const std::string &filename)
@@ -184,9 +227,12 @@ void ResistivePlateModel::GenerateSPICENetlist(const std::string &filename)
                     ele->name.c_str(), ele->x * 1e6, ele->y * 1e6);
 
         // 4.1. 电极虚拟节点（连接平板）
-        out << Form("* 电极虚拟节点\n");
-        out << Form("V%s %s 0 0  ; 用于测量电极总电流\n",
-                    ele->name.c_str(), ele->nodePad.c_str());
+        if (fVirtualVoltageSource)
+        {
+            out << Form("* 电极虚拟节点\n");
+            out << Form("V%s %s 0 0  ; 用于测量电极总电流\n",
+                        ele->name.c_str(), ele->nodePad.c_str());
+        }
 
         // 4.2. 所有SiN耦合电容（连接到同一个Pad节点）
         for (size_t i = 0; i < ele->coupledNodes.size(); i++)
@@ -212,15 +258,10 @@ void ResistivePlateModel::GenerateSPICENetlist(const std::string &filename)
     // 5. 电流注入点模型
     out << "** 电流注入点 (面源模型) **\n";
 
-    // Generate a pulse current source for injection
-    double totalCharge = 1.6e-19 * 5000;      // 总电荷量 (库仑), 5000 e-h对
-    double pulseWidth = 1e-12;                // 脉冲宽度 (秒)，建议1ps
-    double I_peak = totalCharge / pulseWidth; // 峰值电流 (安培)
-    double t_rise = pulseWidth / 2.0;
-    double t_fall = pulseWidth / 2.0;
-    out << Form("Iinj INJ_NODE 0 PWL(0 0 %.3e %.3e %.3e 0) ; 三角形δ脉冲\n",
-                t_rise, I_peak,
-                t_rise + t_fall);
+    if (!fIsPWL)
+        GenerateSPICEInjectionDelta(out, fInjectionCharge, fInjectionPulseWidth);
+    else
+        GenerateSPICEInjectionPWL(out, sfPWLFileName);
 
     // out << Form("Iinj INJ_NODE 0 PULSE(0 1e-6 0 10e-12 10e-12 1e-9 5e-9)\n");
     out << Form("R_spread INJ_NODE %s %.3e\n",
@@ -235,11 +276,30 @@ void ResistivePlateModel::GenerateSPICENetlist(const std::string &filename)
     }
     out << "\n";
 
-    // 6. 仿真指令
+    // 6. 仿真设置
     out << "** 仿真设置 **\n";
-    out << ".tran 0 20n 0 0.1p\n";
+    out << Form(".tran 0 %.3e 0 %.3e\n", fTotalTime, fTimeStep);
+
+    if (!fSaveAll)
+    {
+        for (const auto &nodeName : fSaveNodeNames)
+            if (fVirtualVoltageSource)
+                out << Form(".save I(V%s)\n", nodeName.c_str());
+            else
+                out << Form(".save V(%s)\n", nodeName.c_str());
+        out << Form(".save I(Iinj)\n");
+        out << Form(".save V(INJ_NODE)\n");
+    }
+
     out << ".backanno\n";
     out << ".end\n";
+
+    // 8. 运行指令
+    out << "** 运行指令 **\n";
+    // out << ".control\n";
+    // out << "run\n";
+    // out << "write waveforms.raw all\n";
+    // out << ".endc\n";
 
     out.close();
     std::cout << "网表已生成至: " << filename << std::endl;
@@ -403,6 +463,10 @@ void ResistivePlateModel::AddRectangularElectrode(double centerX, double centerY
     ele.coveredGridNodes = nodes_in_area;
 
     fElectrodes.push_back(ele_pointer);
+    if (fVirtualVoltageSource)
+        AddWaveformNode(ele.name); // 用虚拟电压源监测电流
+    else
+        AddWaveformNode(ele.nodePad); // 监测电极pad电压
 
     // 输出信息
     std::cout << "电极 " << ele.name
@@ -417,14 +481,18 @@ void ResistivePlateModel::AddRectangularElectrode(double centerX, double centerY
 #include "ResistPlateModel.hh"
 #include <TROOT.h>
 
-void generateRSDModel(std::string sFolder = "./")
+void generateRSDModel(std::string sFolder = "./", double xInj = 0.5, double yInj = 0.5, bool kIsRelative = true)
 {
     // 1. 定义物理参数 (示例值，根据实际情况修改)
-    double pitchX = 300e-6;         // 300 um, Unit: m
-    double pitchY = 300e-6;         // 300 um, Unit: m
-    double rSheet = 5e3;            // 5 kOhm/sq
-    double cJunction = 2e-6;        // 2 uF/m^2
-    double gridSize = pitchY / 2.0; // 150 um, Unit: m
+    double pitchX = 300e-6;          // 300 um, Unit: m
+    double pitchY = 300e-6;          // 300 um, Unit: m
+    double rSheet = 5e3;             // 5 kOhm/sq
+    double gridSize = pitchY / 30.0; // 10 um, Unit: m
+    // double gridSize = pitchY / 2.0;               // 150 um, Unit: m
+
+    double thickness_Si = 50e-6;                  // 50 um
+    double epsilon_Si = 11.7 * 8.854e-12;         // Si介电常数
+    double cJunction = epsilon_Si / thickness_Si; // F/m^2
 
     // 2. 读出电路典型参数
     double rAmp = 50e6;                                 // 50 MΩ (放大器输入阻抗)
@@ -442,6 +510,7 @@ void generateRSDModel(std::string sFolder = "./")
     model.BuildModel(electrodeBuffer, extraBufferCells); // 电极缓冲100um，额外1层网格缓冲
 
     // 5. 添加16个电极（4x4阵列）
+    model.SetVirtualVoltageSource(true); // 使用虚拟电压源监测电极电流
     for (int i = 0; i < 4; i++)
     {
         for (int j = 0; j < 4; j++)
@@ -454,7 +523,20 @@ void generateRSDModel(std::string sFolder = "./")
     }
 
     // 6. 设置注入点（在中间4个电极的中心）
-    model.SetInjectionPoint(0.5, 0.5, 50.0, 0.1);
+    model.SetPWLInjection("LGAD-wfm.csv");
+    // model.SetInjectionPoint(0.5, 0.5, 50.0, 0.1);
+    if (kIsRelative)
+        model.SetInjectionPoint(xInj, yInj, 50.0, 0.1); // 相对坐标
+    else
+        model.SetInjectionPointAbsolute(xInj, yInj, 50.0, 0.1); // 绝对坐标
+
+    // 7. 仿真设置
+    // 7.1 仿真时间与步长
+    // model.SetSimulationParameters(20e-9, 0.1e-12); // 总时间20ns，时间步长0.1ps
+    model.SetSimulationParameters(150e-9, 10e-12); // 总时间150ns，时间步长10ps
+    // 7.2 设置保存波形
+    model.SaveAllNodeWaveforms(false); // 不保存所有节点
+    // model.SaveAllNodeWaveforms(true); // 保存所有节点
 
     // 7. 生成SPICE网表
     model.GenerateSPICENetlist(sFolder + "rsd_4x4_model.cir");
