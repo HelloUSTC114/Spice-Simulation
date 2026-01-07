@@ -45,3 +45,8 @@ simu*/
 .vscode
 *.raw
 *.asc
+*.root
+ana/
+*.png
+*.jpg
+*.pdf
